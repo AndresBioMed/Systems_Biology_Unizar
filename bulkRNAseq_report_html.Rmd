@@ -1,0 +1,738 @@
+---
+title: "Biología de Sistemas Unizar: Sox2 Enrichment"
+author: "Andrés Gordo Ortiz"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    code_folding: show
+    code_download: false  
+    df_print: paged
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+---
+
+
+```{css, echo=FALSE}
+/* Custom CSS to enhance styling */
+body {
+  font-family: 'Gill Sans', sans-serif;
+}
+
+h1 {
+  color: #2c3e50;
+  font-family: 'Ubuntu', sans-serif; /* Set header font to Ubuntu */
+}
+
+h2 {
+  color: #3498db;
+  font-family: 'Ubuntu', sans-serif; /* Set header font to Ubuntu */
+}
+
+h3 {
+  color: #7DE2D1;
+  font-family: 'Ubuntu', sans-serif; /* Set header font to Ubuntu */
+}
+p {
+  text-align: justify;
+}
+```
+
+
+```{r setup, include=FALSE}
+library(rmarkdown)
+library(tinytex)
+library(openxlsx)
+library(readxl)
+library(knitr)
+library(beepr)
+library(tidyverse) 
+library(tximport)
+library(ensembldb) 
+library(EnsDb.Hsapiens.v86)
+library(edgeR)
+library(matrixStats)
+library(cowplot)
+library(svglite)
+library(DT)
+library(gt)
+library(plotly)
+library(limma)
+library(gplots)
+library(RColorBrewer) 
+library(heatmaply)
+library(tidyverse)
+library(limma)
+library(GSEABase)
+library(Biobase)
+library(GSVA)
+library(gprofiler2)
+library(clusterProfiler) 
+library(msigdbr) 
+library(enrichplot)
+library(IsoformSwitchAnalyzeR)
+dir.create("report", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/data", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/QualityofReads", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/multivariate_analysis", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/diff_genes", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/heatmaps", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/FunctionalEnrichment", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/FunctionalEnrichment/GSEA", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/FunctionalEnrichment/GSEA/H", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/plots/FunctionalEnrichment/GSEA/C2", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/tables", showWarnings = FALSE, recursive = TRUE)
+dir.create("report/IsoformSwitchAnalyzer", showWarnings = FALSE, recursive = TRUE)
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r settings}
+# Change title
+# Change and adapt lines 420_441, 536
+# Check the modules are ok on the heatmaps
+# Add and change the proper study design, keep it standard
+
+condition1<-"SOX UP"
+condition_control<-"SOX DOWN"
+explanation<- "Sox2 Enrichment Transcription"
+samples_nodepth<-c()
+nocpm_threshold<-615 #IMPORTANT PARAMETRE: minimum number of samples with CPM > 1
+p_value_threshold<-10^-100
+logFC_threshold<-3
+species<-"Homo sapiens"
+project_source<- "Archs4"
+project_name<-"Systems Biology project"
+
+
+# In this chunk create the studydesign.txt:
+
+```
+
+
+# What can I find in this Report?
+This analysis performs a fully crafted **Transcriptomics Protocol**, from read mapping, filtering and normalisation, up to Differential Gene Expression or Ontology enrichment
+
+
+## Data Integration
+
+- Following count matrix import from **Arcs4**, the [TxImport](https://bioconductor.org/packages/release/bioc/html/tximport.html) package was utilized to import Kallisto outputs into the R environment.
+
+## Data Summarization
+
+- Annotation data from Biomart was employed to summarize the data from transcript-level to gene-level, providing a comprehensive view of the gene expression landscape.
+
+
+
+------------------------------------------------------------------------
+
+# Preprocessing
+
+## Filtering & normalisation
+
+```{r dataWrangling}
+
+data_up<- read.delim("SOX2 Up_similar_expression_matrix.tsv", header = TRUE, row.names = NULL)
+data_down<- read.delim("SOX2_Down_similar_expression_matrix.tsv", header = TRUE, row.names = NULL)
+
+data_sox<-cbind(data_up, data_down[,-1])
+geneLabels<-make.names(data_sox$X, unique=TRUE)
+rownames(data_sox)<-geneLabels
+data_sox<-data_sox[,-1]
+
+study_design<-data.frame(sample=c(colnames(data_up[,-1]), colnames(data_down[,-1])), condition=c(rep("up",ncol(data_up[,-1])), rep("down",ncol(data_down[,-1]))))
+sampleLabels<-study_design$sample
+all_samples<-sampleLabels
+
+myDGEList <- DGEList(data_sox)
+log2.cpm <- cpm(myDGEList, log=TRUE)
+
+log2.cpm.df <- as_tibble(log2.cpm, rownames = "geneID")
+colnames(log2.cpm.df) <- c("geneID", sampleLabels)
+log2.cpm.df.pivot <- pivot_longer(log2.cpm.df, 
+                                  cols = head(sampleLabels, 1):tail(sampleLabels, 1),         
+                                  names_to = "samples", 
+                                  values_to = "expression") 
+
+
+cpm <- cpm(myDGEList)
+keepers <- rowSums(cpm>1)>=nocpm_threshold 
+myDGEList.filtered <- myDGEList[keepers,]
+
+log2.cpm.filtered <- cpm(myDGEList.filtered, log=TRUE)
+log2.cpm.filtered.df <- as_tibble(log2.cpm.filtered, rownames = "geneID")
+colnames(log2.cpm.filtered.df) <- c("geneID", sampleLabels)
+log2.cpm.filtered.df.pivot <- pivot_longer(log2.cpm.filtered.df, 
+                                           cols = head(sampleLabels, 1):tail(sampleLabels, 1), 
+                                           names_to = "samples", 
+                                           values_to = "expression") 
+
+
+
+myDGEList.filtered.norm <- calcNormFactors(myDGEList.filtered, method = "TMM")
+log2.cpm.filtered.norm <- cpm(myDGEList.filtered.norm, log=TRUE)
+log2.cpm.filtered.norm.df <- as_tibble(log2.cpm.filtered.norm, rownames = "geneID")
+colnames(log2.cpm.filtered.norm.df) <- c("geneID", sampleLabels)
+log2.cpm.filtered.norm.df.pivot <- pivot_longer(log2.cpm.filtered.norm.df, 
+                                                cols = head(sampleLabels, 1):tail(sampleLabels, 1),
+                                                names_to = "samples", 
+                                                values_to = "expression") 
+
+
+
+```
+
+
+
+Filtering was carried out to remove lowly expressed genes. Genes with less than 1 count per million (CPM) in at least `r nocpm_threshold` or more samples were filtered out. This is done to make sure that the low expression is due to a lack of significance across **all** conditions, and not an intrinsic property of one of them. This filtering reduced the number of genes from `r nrow(myDGEList)` to `r nrow(myDGEList.filtered)`. Normalisation of samples was performed with [edgeR](https://bioconductor.org/packages/release/bioc/html/edgeR.html), using *Trimmed Mean of M-value* or *TMM*. This method is based on the assumption that most genes are not differentially expressed. It **calculates a scaling factor for each sample**, which is the median of the ratio of each gene's expression to the geometric mean of all samples. This scaling factor is then used to normalise the expression of each gene in each sample. The normalised expression is then expressed as log2(CPM). The normalisation step is important because it **allows for the comparison of expression between samples**.
+
+According to *fastQC* results, a total of `r sum(samples_nodepth)` samples were removed due to low quality. This is `r round(sum(samples_nodepth)/length(samples_nodepth)*100, 2)`% of the total reads. Filtered out samples are: `r all_samples[samples_nodepth]`.
+
+
+
+------------------------------------------------------------------------
+
+## Filtered and Normalised data
+
+```{r multivariate, fig.cap="Scatter plot showing the divergence in the average expression of every gene between the two conditions"}
+
+
+
+mydata.df <- log2.cpm.filtered.norm.df
+mydata.df$up.AVG<-rowSums(log2.cpm.filtered.norm.df[,colnames(log2.cpm.filtered.norm.df) %in% study_design$sample[study_design$condition=="up"]])/sum(colnames(log2.cpm.filtered.norm.df) %in% study_design$sample[study_design$condition=="up"])
+
+mydata.df$down.AVG<-rowSums(log2.cpm.filtered.norm.df[,colnames(log2.cpm.filtered.norm.df) %in% study_design$sample[study_design$condition=="down"]])/sum(colnames(log2.cpm.filtered.norm.df) %in% study_design$sample[study_design$condition=="down"])
+
+mydata.df$LogFC<-mydata.df$up.AVG-mydata.df$down.AVG
+scatter <- ggplot(mydata.df) + 
+  aes(x=down.AVG, y=up.AVG, color=abs(LogFC), text = paste("Symbol:", geneID)) +
+  geom_point(shape=16, size=1) +
+  ggtitle(paste0(condition1," vs. ", condition_control)) +
+  theme_bw()
+
+# only in html ggplotly(scatter)
+ggplotly(scatter)
+```
+
+
+The **Table 1** includes expression data for `r nrow(myDGEList.filtered)` genes. You can sort and search the data directly from the table.
+
+------------------------------------------------------------------------
+
+# Principal Component Analysis
+
+
+## PCA
+```{r  multivariate part 2 (PCA plot), warning=FALSE, message=FALSE, fig.cap="Principal Component Analysis plot coloured by condition. The 95% confidence interval is shown if enough samples are analysed."}
+condition <- study_design$condition
+condition <- factor(condition)
+
+
+pca.res <- prcomp(t(log2.cpm.filtered.norm), scale.=F, retx=T)
+pc.var<-pca.res$sdev^2 # sdev^2 captures these eigenvalues from the PCA result
+pc.per<-round(pc.var/sum(pc.var)*100, 1) 
+pca.res.df <- pca.res$x[,1:4] %>% 
+  as_tibble() %>%
+  add_column(sample = sampleLabels,
+             group = condition)
+
+pca.plot_condition <- ggplot(pca.res.df) +
+  aes(x=PC1, y=PC2, label=sampleLabels, color = condition) +
+  geom_point(size=4) +
+  stat_ellipse() +
+  xlab(paste0("PC1 (",pc.per[1],"%",")")) + 
+  ylab(paste0("PC2 (",pc.per[2],"%",")")) +
+  labs(title="PCA plot coloured by Condition",
+       caption=paste0("produced on ", Sys.time())) +
+  coord_fixed() +
+  theme_bw()
+
+
+
+  
+pca.pivot <- pivot_longer(pca.res.df, 
+                          cols = PC1:PC4, 
+                          names_to = "PC", 
+                          values_to = "loadings") 
+
+
+
+save_plot("report/plots/multivariate_analysis/pca.svg",pca.plot_condition, base_width = 15, base_height = 7)
+
+
+ggplotly(pca.plot_condition)
+```
+
+
+------------------------------------------------------------------------
+
+# Volcano plot
+
+An **important** note: all the contrasts, design matrix and differential expression analysis are made according to this formula ***(`r condition1` - `r condition_control`)***. This means that a *logfold change* > 0 shows that the first condition is upregulated, whereas a *logfold change* < 0 shows downregulation.
+
+```{r diffGenes volcano plot, warning=FALSE, fig.cap="Volcano plot of differencial gene expression.The lines delimit the log-fold change and adjusted p-value (FDR) thresholds."}
+design <- model.matrix(~0 + condition)
+colnames(design) <- levels(condition)
+
+v.DEGList.filtered.norm <- voom(myDGEList.filtered.norm, design, plot = FALSE)
+fit <- lmFit(v.DEGList.filtered.norm, design)
+contrast.matrix <- makeContrasts(treatment =  up - down,
+                                 levels=design)
+
+fits <- contrasts.fit(fit, contrast.matrix)
+ebFit <- eBayes(fits)
+myTopHits <- topTable(ebFit, adjust ="BH", coef=1, number=40000, sort.by="logFC")
+
+myTopHits.df <- myTopHits %>%
+  as_tibble(rownames = "geneID")
+
+vplot <- ggplot(myTopHits.df) +
+  aes(y=-log10(adj.P.Val), x=logFC, text = paste("Symbol:", geneID)) +
+  geom_point(size=2) +
+  geom_hline(yintercept = -log10(p_value_threshold), linetype="longdash", colour="grey", size=1) +
+  geom_vline(xintercept = logFC_threshold, linetype="longdash", colour="#BE684D", size=1) +
+  geom_vline(xintercept = -logFC_threshold, linetype="longdash", colour="#2C467A", size=1) +
+  #annotate("rect", xmin = 1, xmax = 12, ymin = -log10(0.01), ymax = 7.5, alpha=.2, fill="#BE684D") +
+  #annotate("rect", xmin = -1, xmax = -12, ymin = -log10(0.01), ymax = 7.5, alpha=.2, fill="#2C467A") +
+  labs(title="Volcano plot",
+       subtitle = explanation,
+       caption=paste0("produced on ", Sys.time())) +
+  scale_x_continuous(n.breaks = 8)+
+  theme_bw()
+
+save_plot("report/plots/diff_genes/volcano.svg",vplot, base_width = 15, base_height = 7)
+save_plot("report/plots/diff_genes/volcano.png",vplot, base_width = 15, base_height = 7)
+
+# Only in html ggplotly(vplot)
+ggplotly(vplot)
+
+
+```
+
+# MA Plot
+```{r MA Plot, fig.cap="The plot is an MA plot colored by False Discovery Rate (FDR). It shows the relationship between average expression level (AveExpr) and log fold change (logFC) for genes or features. Points are colored blue for FDR passed, or red for FDR not passed"}
+ma_color <- ifelse(myTopHits.df$adj.P.Val >= p_value_threshold, "red", "blue")
+
+# Plot
+ma_plot <- ggplot(myTopHits.df, aes(x = AveExpr, y = logFC,text = paste("Symbol:", geneID))) +
+  geom_point(color=ma_color,shape = 16, size = 3, alpha = 0.6) +  # Adjust size and transparency
+  ggtitle(paste0("MA Plot Coloured by FDR Test>=",p_value_threshold)) +
+  theme_minimal() +  # Change to minimal theme for cleaner appearance
+  labs(x = "Average Expression", y = "Log Fold Change", color = "FDR >= 0.01") +  # Add axis labels
+  scale_color_manual(values = c("blue", "red"), labels = c(paste0("FDR <", p_value_threshold), paste0("FDR >=",p_value_threshold))) +  # Custom color scale
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),  # Adjust title appearance
+    axis.title = element_text(size = 14),  # Adjust axis label appearance
+    legend.title = element_text(size = 12),  # Adjust legend title appearance
+    legend.text = element_text(size = 10)  # Adjust legend label appearance
+  )
+
+save_plot("report/plots/diff_genes/ma_plot.svg",ma_plot, base_width = 15, base_height = 7)
+save_plot("report/plots/diff_genes/ma_plot.png",ma_plot, base_width = 15, base_height = 7)
+
+ggplotly(ma_plot)
+```
+
+
+------------------------------------------------------------------------
+
+# Table of DEGs
+
+To identify differentially expressed genes, precision weights were first applied to each gene based on its mean-variance relationship using [VOOM](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2014-15-2-r29), then data was normalized using the [TMM method](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2010-11-3-r25) in [EdgeR](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2796818/). Linear modeling and bayesian stats were employed via [Limma](https://academic.oup.com/nar/article/43/7/e47/2414268) to find genes that were up- or down-regulated by **`r logFC_threshold`-logfold or more, with a false-discovery rate (FDR) of `r p_value_threshold`**.
+
+```{r step 5 - diffGenes part 2 (DEG table)}
+results <- decideTests(ebFit, method="global", adjust.method="BH", p.value=p_value_threshold, lfc=logFC_threshold)
+colnames(v.DEGList.filtered.norm$E) <- sampleLabels
+diffGenes <- v.DEGList.filtered.norm$E[results[,1] !=0,]
+diffGenes.df <- as_tibble(diffGenes, rownames = "geneID")
+
+
+```
+
+```{r table 2 only html, eval=TRUE}
+datatable(diffGenes.df[,c(1,ncol(diffGenes.df)-3,ncol(diffGenes.df)-2,ncol(diffGenes.df)-1)], 
+          extensions = c('KeyTable', "FixedHeader"), 
+          caption = paste0('Table 2: DEGs: ', explanation),
+          options = list(keys = TRUE, 
+                         searchHighlight = TRUE, 
+                         pageLength = 10, 
+                         lengthMenu = c("10", "25", "50", "100")))
+
+```
+
+
+------------------------------------------------------------------------
+
+# Heatmaps and Modules {.tabset}
+
+Pearson correlation was used to cluster **`r nrow(diffGenes)`** differentially expressed genes, which were then represented as heatmap with the data scaled by *Zscore* for each row. On the other hand, Spearman correlation was used to cluster all samples. Two *modules* can be seen, being either up- or down-regulated depending on the condition of the samples.
+
+```{r step 6 - modules part 1 (heatmap), results='hide'}
+# I will do a subsample of the matrix
+myheatcolors <- rev(brewer.pal(name="RdBu", n=11))
+clustRows <- hclust(as.dist(1-cor(t(diffGenes[,c(1:50, 787:836)]), method="pearson")), method="complete") 
+
+clustColumns <- hclust(as.dist(1-cor(diffGenes[,c(1:50, 787:836)], method="spearman")), method="complete")
+module.assign <- cutree(clustRows, k=2) #Important parametre
+module.color <- rainbow(length(unique(module.assign)), start=0.1, end=0.9) 
+module.color <- module.color[as.vector(module.assign)] 
+
+module.assign_col<-cutree(clustColumns, k=2) #Important parametre
+module.color_col <- rainbow(length(unique(module.assign_col)), start=0.1, end=0.9) 
+module.color_col <- module.color_col[as.vector(module.assign_col)]
+
+
+
+
+```
+
+
+
+## Complete
+```{r interactive heatmap full onl html, eval=TRUE}
+
+heatmap.2(diffGenes[,c(1:50, 787:836)], 
+          Rowv=as.dendrogram(clustRows), 
+          Colv=as.dendrogram(clustColumns),
+          RowSideColors=module.color,
+          ColSideColors = module.color_col,
+          col=myheatcolors, scale='row', labRow=NA,
+          density.info="none", trace="none",  
+          cexRow=1, cexCol=1, margins=c(7,8))
+
+```
+
+```{r modules part 2 (cluster upregulated in condition1), results='hide'}
+modulePick <- 1  #Be careful with which is which
+myModule_up <- diffGenes[names(module.assign[module.assign %in% modulePick]),] 
+hrsub_up <- hclust(as.dist(1-cor(t(myModule_up), method="pearson")), method="complete") 
+
+
+
+moduleSymbols <- tibble(geneID = rev(hrsub_up$labels[hrsub_up$order]))
+moduleData <- diffGenes[moduleSymbols$geneID,]
+moduleData.df <- as_tibble(moduleData, rownames = "geneSymbol", .name_repair = "unique")
+
+```
+
+
+## Upregulated in `r condition1`
+```{r interactive heatmap up only html, eval=TRUE}
+
+
+heatmap.2(myModule_up[,c(1:50, 787:836)], 
+          Rowv=as.dendrogram(hrsub_up), 
+          Colv=as.dendrogram(clustColumns), 
+          labRow = NA,
+          col=myheatcolors, scale="row", 
+          density.info="none", trace="none", 
+          RowSideColors=module.color[module.assign%in%modulePick], margins=c(8,20))
+```
+
+```{r step 6 - modules part 3 (downregulated genes in condition1), results='hide'}
+modulePick <- 2 
+myModule_down <- diffGenes[names(module.assign[module.assign %in% modulePick]),] 
+hrsub_down <- hclust(as.dist(1-cor(t(myModule_down), method="pearson")), method="complete") 
+
+```
+
+
+## Downregulated in `r condition1`
+```{r interactive heatmap down only html, eval=TRUE}
+heatmap.2(myModule_down[,c(1:50, 787:836)], 
+          Rowv=as.dendrogram(hrsub_down), 
+          Colv=as.dendrogram(clustColumns), 
+          labRow = NA,
+          col=myheatcolors, scale="row", 
+          density.info="none", trace="none", 
+          RowSideColors=module.color[module.assign%in%modulePick])
+
+
+```
+
+# GO enrichment
+
+Gene Ontology enrichment for the `r nrow(myTopHits)` genes differentially expressed.
+
+## Upregulated genes in `r condition1` {.tabset}
+
+### Manhattan Plot
+```{r functionalEnrichment part 1 (gostplot for upregulated genes) pdf version, fig.cap="Manhattan plot of GO enrichment for upregulated genes"}
+#NOTE: The idea here is to provide 3 results: a simple gostplot with no labels, a gostplot highlighting the top 10 terms, and a table with all the results.
+gost.res_up <- gost(rownames(myModule_up), organism = "hsapiens", correction_method = "fdr")
+mygostplot_up<-gostplot(gost.res_up, interactive = F, capped = F) #set interactive=FALSE to get plot for publications
+mytable_up_sorted<-dplyr::arrange(gost.res_up$result,p_value)%>%
+  dplyr::select(term_id,p_value,source,term_name,parents)%>%
+  apply(2,as.character)%>%
+  as_tibble()
+
+
+save_plot("report/plots/FunctionalEnrichment/go_manhattanplotFunctionalEnrichment_Up.svg",mygostplot_up)
+save_plot("report/plots/FunctionalEnrichment/go_manhattanplotFunctionalEnrichment_Up.png",mygostplot_up)
+
+mygostplot_up<-gostplot(gost.res_up, interactive = T, capped = F)
+mygostplot_up
+```
+
+
+### Table
+```{r upregulated table sorted only html, eval=TRUE}
+datatable(mytable_up_sorted, 
+          extensions = c('KeyTable', "FixedHeader"), 
+          caption = paste0('Table 4: Functional Enrichment of Up Regulated genes in ', condition1),
+          options = list(keys = TRUE, searchHighlight = TRUE, pageLength = 10, lengthMenu = c("10", "25", "50", "100")))
+```
+
+## Downregulated genes in `r condition1` {.tabset}
+
+### Manhattan Plot
+```{r functionalEnrichment part 1 (gostplot for Downregulated genes) pdf version, fig.cap="Manhattan plot of GO enrichment for downregulated genes"}
+#NOTE: The idea here is to provide 3 results: a simple gostplot with no labels, a gostplot highlighting the top 10 terms, and a table with all the results.
+gost.res_down <- gost(rownames(myModule_down), organism = "hsapiens", correction_method = "fdr")
+mygostplot_down<-gostplot(gost.res_down, interactive = F, capped = F) #set interactive=FALSE to get plot for publications
+mytable_down_sorted<-dplyr::arrange(gost.res_down$result,p_value)%>%
+  dplyr::select(term_id,p_value,source,term_name,parents)%>%
+  apply(2,as.character)%>%
+  as_tibble()
+
+
+
+save_plot("report/plots/FunctionalEnrichment/manhattanplotFunctionalEnrichment_Down.svg",mygostplot_down)
+save_plot("report/plots/FunctionalEnrichment/manhattanplotFunctionalEnrichment_Down.png",mygostplot_down)
+
+mygostplot_down<-gostplot(gost.res_down, interactive = T, capped = F)
+mygostplot_down
+```
+
+### Table
+```{r downregulated table sorted only html, eval=TRUE}
+datatable(mytable_down_sorted, 
+          extensions = c('KeyTable', "FixedHeader"), 
+          caption = paste0('Table 5: Functional Enrichment of Down Regulated genes in ', condition1),
+          options = list(keys = TRUE, searchHighlight = TRUE, pageLength = 10, lengthMenu = c("10", "25", "50", "100")))
+```
+
+# GSEA
+The 34550 gene sets in the Human Molecular Signatures Database **(MSigDB)** are divided into 9 major collections, and several subcollections. In this analysis, we will use the **C2** (Curated Genes) and **H** (Hallmark genes) collections, which contains gene sets that represent canonical pathways, gene ontology, and other gene sets derived from knowledge in the literature. The top 15 genes set for each conditions and collection will have their own *Gene Set Enrichment Plot*. The table will contain all the results for each gene set. A sample plot is shown below.
+
+## C2 Collection {.tabset}
+```{r step 7 - functionalEnrichment C2 (GSEA table)}
+hs_gsea_C2 <- msigdbr(species = species,
+                      category = "C2") %>% #  msigdb collection of interest
+  dplyr::select(gs_name, gene_symbol)
+
+
+# Pull out just the columns corresponding to gene symbols and LogFC for at least one pairwise comparison for the enrichment analysis
+mydata.df.sub <- dplyr::select(mydata.df, geneID, LogFC)
+mydata.gsea <- mydata.df.sub$LogFC
+names(mydata.gsea) <- as.character(mydata.df.sub$geneID)
+mydata.gsea <- sort(mydata.gsea, decreasing = TRUE)
+
+# run GSEA using the 'GSEA' function from clusterProfiler
+myGSEA.res_C2 <- GSEA(mydata.gsea, TERM2GENE=hs_gsea_C2, verbose=FALSE)
+myGSEA.df_C2 <- as_tibble(myGSEA.res_C2@result)
+
+```
+
+### GSEA Plot
+```{r step 7 - functionalEnrichment C2 (enrich plot), fig.cap="Sample of a Gene Set Enrichment Plot from the C2 Collection"}
+gseaplot2(myGSEA.res_C2, 
+          geneSetID = 1, #can choose multiple signatures to overlay in this plot
+          pvalue_table = F, #can set this to FALSE for a cleaner plot
+          title = myGSEA.res_C2$Description[1]) #can also turn off this title
+```
+
+
+```{r make enrichment plots for both phenotypes C2, results='hide'}
+subset_indices <- which(myGSEA.df_C2$NES > 0)
+
+# Check the length of the subset
+subset_length <- length(subset_indices)
+
+# Set the number of iterations based on the length
+iterations <- ifelse(subset_length < 15, subset_length, 15)
+
+if (iterations>0){
+  for (i in 1:iterations){
+    name<-paste0("report/plots/FunctionalEnrichment/GSEA/C2/GSEAplot_C2_",condition1,"Enriched",i,".svg")
+    save_plot(name, gseaplot2(myGSEA.res_C2, 
+            geneSetID = which(myGSEA.df_C2$NES>0)[i], #can choose multiple signatures to overlay in this plot
+            pvalue_table = F, #can set this to FALSE for a cleaner plot
+            title = myGSEA.res_C2[myGSEA.df_C2$NES>0,]$Description[i]))
+  }
+}
+
+subset_indices <- which(myGSEA.df_C2$NES < 0)
+
+# Check the length of the subset
+subset_length <- length(subset_indices)
+
+# Set the number of iterations based on the length
+iterations <- ifelse(subset_length < 15, subset_length, 15)
+
+if (iterations>0){
+  for (i in 1:iterations){
+    name<-paste0("report/plots/FunctionalEnrichment/GSEA/C2/GSEAplot_C2_",condition_control,"Enriched",i,".svg")
+    save_plot(name, gseaplot2(myGSEA.res_C2, 
+            geneSetID = which(myGSEA.df_C2$NES<0)[i], #can choose multiple signatures to overlay in this plot
+            pvalue_table = F, #can set this to FALSE for a cleaner plot
+            title = myGSEA.res_C2[myGSEA.df_C2$NES<0,]$Description[i]))
+  }
+}
+
+
+myGSEA.df_C2 <- myGSEA.df_C2 %>%
+  mutate(phenotype = case_when(
+    NES > 0 ~ condition1,
+    NES < 0 ~ condition_control))
+myGSEA.df_C2$NES<-abs(myGSEA.df_C2$NES)
+```
+
+### Table
+```{r table of functional enrichment C2 html only, eval=TRUE}
+datatable(myGSEA.df_C2, 
+          extensions = c('KeyTable', "FixedHeader"), 
+          caption = "Table 6.1: Enrichment plots for both phenotypes in C2 Collection",
+          options = list(keys = TRUE, searchHighlight = TRUE, pageLength = 10, lengthMenu = c("10", "25", "50", "100")))
+```
+
+## Hallmark Collection {.tabset}
+```{r step 7 - functionalEnrichment H (GSEA table)}
+hs_gsea_H <- msigdbr(species = species,
+                      category = "H") %>% #  msigdb collection of interest
+  dplyr::select(gs_name, gene_symbol)
+
+
+# run GSEA using the 'GSEA' function from clusterProfiler
+myGSEA.res_H <- GSEA(mydata.gsea, TERM2GENE=hs_gsea_H, verbose=FALSE)
+myGSEA.df_H <- as_tibble(myGSEA.res_H@result)
+
+```
+
+### GSEA Plot
+```{r step 7 - functionalEnrichment H (enrich plot), fig.cap="Sample of a Gene Set Enrichment Plot from the Hallmark Collection"}
+gseaplot2(myGSEA.res_H, 
+          geneSetID = 1, #can choose multiple signatures to overlay in this plot
+          pvalue_table = F, #can set this to FALSE for a cleaner plot
+          title = myGSEA.res_H$Description[1]) #can also turn off this title
+```
+
+```{r make enrichment plots for both phenotypes H, results='hide'}
+subset_indices <- which(myGSEA.df_H$NES > 0)
+
+# Check the length of the subset
+subset_length <- length(subset_indices)
+
+# Set the number of iterations based on the length
+iterations <- ifelse(subset_length < 15, subset_length, 15)
+
+if (iterations>0){
+  for (i in 1:iterations){
+    name<-paste0("report/plots/FunctionalEnrichment/GSEA/H/GSEAplot_H_",condition1,"Enriched",i,".svg")
+    save_plot(name, gseaplot2(myGSEA.res_H, 
+            geneSetID = which(myGSEA.df_H$NES>0)[i], #can choose multiple signatures to overlay in this plot
+            pvalue_table = F, #can set this to FALSE for a cleaner plot
+            title = myGSEA.res_H[myGSEA.df_H$NES>0,]$Description[i]))
+  }
+}
+
+subset_indices <- which(myGSEA.df_H$NES < 0)
+
+# Check the length of the subset
+subset_length <- length(subset_indices)
+
+# Set the number of iterations based on the length
+iterations <- ifelse(subset_length < 15, subset_length, 15)
+
+if (iterations>0){
+  for (i in 1:iterations){
+    name<-paste0("report/plots/FunctionalEnrichment/GSEA/H/GSEAplot_H_",condition_control,"Enriched",i,".svg")
+    save_plot(name, gseaplot2(myGSEA.res_H, 
+            geneSetID = which(myGSEA.df_H$NES<0)[i], #can choose multiple signatures to overlay in this plot
+            pvalue_table = F, #can set this to FALSE for a cleaner plot
+            title = myGSEA.res_H[myGSEA.df_H$NES<0,]$Description[i]))
+  }
+}  
+
+
+
+
+# add a variable to this result that matches enrichment direction with phenotype
+
+myGSEA.df_H <- myGSEA.df_H %>%
+  mutate(phenotype = case_when(
+    NES > 0 ~ condition1,
+    NES < 0 ~ condition_control))
+myGSEA.df_H$NES<-abs(myGSEA.df_H$NES)
+
+dataset_names <- list("Hallmark Collection" = myGSEA.df_H, "C2 Collection" = myGSEA.df_C2)
+write.xlsx(dataset_names, file = 'report/tables/table8_functionalEnrichment.xlsx')
+```
+
+### Table
+```{r table of functional enrichment H html only, eval=TRUE}
+datatable(myGSEA.df_H, 
+          extensions = c('KeyTable', "FixedHeader"), 
+          caption = "Table 6.2: Enrichment plots for both phenotypes in H Collection",
+          options = list(keys = TRUE, searchHighlight = TRUE, pageLength = 10, lengthMenu = c("10", "25", "50", "100")))
+```
+
+## Bubble Plot {.tabset}
+Finally, a *Bubble Plot* is produced for the top 20 gene sets. The size of the bubble is proportional to the number of genes in the gene set, the color is proportional to the **NES**, and the alpha is proportional to the *-log10(p.adjust)*. The plot is shown below. **NES** means normalized enrichment score, and it is the primary statistic for ranking genes in a GSEA analysis. It represents the degree to which a gene set is overrepresented at the top or bottom of a ranked list of genes. The score is normalized to account for differences in gene set size and in correlations between gene set members and the expression dataset. The **NES** score can be either >0, which means is enriched in the *`r condition1`* condition, or <0, which means it is enriched in the *`r condition_control`* condition. The table provided shows the absolute score beacause it has already been classified in one the two conditions.
+
+### C2 Collection
+```{r functionalEnrichment C2 (bubble plot), fig.align='left', fig.cap="Bubble plot of the top 20 gene sets within the C2 Collection"}
+
+top <- sort(abs(myGSEA.df_C2$NES), index.return=TRUE, decreasing=TRUE)
+# create 'bubble plot' to summarize y signatures across x phenotypes
+bubbleplot_C2<-ggplot(myGSEA.df_C2[top$ix[1:20],], aes(x=phenotype, y=ID)) + 
+  geom_point(aes(size=setSize, color = NES, alpha=-log10(p.adjust))) +
+  scale_color_gradient(low="blue", high="red") +
+  theme_bw() +
+  theme(legend.position="bottom") +
+  labs(x = NULL, y = NULL)+
+  scale_x_discrete(guide = guide_axis(angle = 60))
+
+save_plot("report/plots/FunctionalEnrichment/bubbleplotEnrichment_C2.svg", bubbleplot_C2)
+save_plot("report/plots/FunctionalEnrichment/bubbleplotEnrichment_C2.png", bubbleplot_C2)
+
+ggplotly(bubbleplot_C2)
+```
+
+### Hallmarks Collection
+```{r functionalEnrichment H (bubble plot), fig.align='left', fig.cap="Bubble plot of the top 20 gene sets within the H Collection"}
+
+top <- sort(abs(myGSEA.df_H$NES), index.return=TRUE, decreasing=TRUE)
+# create 'bubble plot' to summarize y signatures across x phenotypes
+bubbleplot_H<-ggplot(myGSEA.df_H[top$ix[1:20],], aes(x=phenotype, y=ID)) + 
+  geom_point(aes(size=setSize, color = NES, alpha=-log10(p.adjust))) +
+  scale_color_gradient(low="blue", high="red") +
+  theme_bw() +
+  theme(legend.position="bottom") +
+  labs(x = NULL, y = NULL) +
+  scale_x_discrete(guide = guide_axis(angle = 60))
+
+save_plot("report/plots/FunctionalEnrichment/bubbleplotEnrichment_H.svg", bubbleplot_H)
+save_plot("report/plots/FunctionalEnrichment/bubbleplotEnrichment_H.png", bubbleplot_H)
+
+ggplotly(bubbleplot_H)
+```
+
+------------------------------------------------------------------------
+
+
+
+# Session info
+
+The output from running 'sessionInfo' is shown below and details all packages and version necessary to reproduce the results in this report.
+
+```{r session info}
+sessionInfo()
+```
+
+```{r final beep, results='hide'}
+beep(3)
